@@ -107,6 +107,27 @@ async def test_self_review_can_be_disabled() -> None:
     assert len(bot.ollama_client.calls) == 1
 
 
+async def test_self_review_targets_latest_user_request() -> None:
+    bot = object.__new__(LlamaClawBot)
+    bot.settings = SimpleNamespace(self_review_enabled=True)
+    bot.ollama_client = FakeOllamaClient(["draft answer", "reviewed answer"])
+
+    await bot._generate_response(
+        [
+            {"role": "system", "content": "prompt"},
+            {"role": "user", "content": "tell me about the recent changes with AI"},
+        ],
+        [],
+    )
+
+    review_call = bot.ollama_client.calls[1]
+    assert any(
+        "tell me about the recent changes with AI" in message["content"]
+        for message in review_call
+        if message["role"] == "user"
+    )
+
+
 async def test_command_decision_uses_model_output() -> None:
     bot = object.__new__(LlamaClawBot)
     bot.ollama_client = FakeOllamaClient(['{"cmd":"research","search":"bowtiedcyber","url":null,"reason":"user asked for investigation"}'])

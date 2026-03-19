@@ -383,6 +383,10 @@ class LlamaClawBot:
         draft = await self.ollama_client.chat(prompt_messages)
         if not self.settings.self_review_enabled:
             return draft
+        latest_user_request = next(
+            (message["content"] for message in reversed(prompt_messages) if message["role"] == "user"),
+            "",
+        )
 
         review_messages = [
             *prompt_messages,
@@ -391,15 +395,18 @@ class LlamaClawBot:
                 "role": "system",
                 "content": (
                     "Review the assistant draft carefully before sending it. "
+                    "Your job is to answer the user's latest request directly, not to comment on missing context. "
+                    "If the draft is weak, confused, or meta, rewrite it from scratch using the available research and conversation context. "
                     "Look for factual errors, unsupported claims, weak reasoning, and missing caveats. "
                     "If research results were supplied, do not state anything that is not grounded in them. "
                     "Do not over-refuse legitimate business research, public prospecting, or public-company lead generation tasks. "
                     "Prefer a useful answer using public information over a generic safety refusal. "
+                    "Never say you were not given a prompt, question, or context if a user request exists. "
                     "Rewrite the answer so it is slower, more careful, and more accurate. "
                     "Return only the improved final answer."
                 ),
             },
-            {"role": "user", "content": "Produce the best final answer now."},
+            {"role": "user", "content": f"Produce the best final answer to this request now: {latest_user_request}"},
         ]
         return await self.ollama_client.chat(review_messages)
 
