@@ -95,7 +95,7 @@ class LlamaClawBot:
         self.conversation_repo.save(conversation)
         self.refresh_worker.record_message_and_maybe_refresh(chat_id)
 
-        command = await self._decide_command(user_text)
+        command = await self._decide_command(user_text, profile, conversation.messages)
         research_context = None
         search_results = []
         crawled_pages = []
@@ -146,8 +146,10 @@ class LlamaClawBot:
         self.refresh_worker.record_message_and_maybe_refresh(chat_id)
         await update.message.reply_text(response_text)
 
-    async def _decide_command(self, text: str) -> CommandDecision:
+    async def _decide_command(self, text: str, profile, conversation: list[ChatMessage]) -> CommandDecision:
         direct_url = self._extract_url(text)
+        profile_summary = self.context_assembler._build_profile_summary(profile) if profile else ""
+        recent_context = "\n".join(f"{message.role}: {message.text}" for message in conversation[-6:])
         planner_messages = [
             {
                 "role": "system",
@@ -158,7 +160,18 @@ class LlamaClawBot:
                     "Use research when the user is asking for facts, investigation, online discovery, external validation, or to look into a person, brand, site, or company. "
                     "Set search to the best concise search query. "
                     "Set url if the user gave a direct URL or clearly wants a specific website crawled. "
+                    "Use the user's profile and recent conversation to resolve references like 'my business', 'what now', or 'that company'. "
+                    "Do not choose research for vague planning or reflective follow-ups unless external information is actually needed. "
                     "Do not include markdown fences or extra commentary."
+                ),
+            },
+            {
+                "role": "system",
+                "content": (
+                    "User profile context:\n"
+                    + (profile_summary or "- No completed onboarding profile yet.")
+                    + "\n\nRecent conversation:\n"
+                    + (recent_context or "- No recent messages.")
                 ),
             },
             {"role": "user", "content": text},

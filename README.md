@@ -33,14 +33,37 @@ Set these environment variables before starting the app:
 - `WEBHOOK_SECRET`
 - `WEBHOOK_PATH`
 
-## Running locally
+## Running locally without Docker
 
-```bash
-pip install -e .[dev]
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+First-time setup:
+
+```powershell
+.\scripts\install_local.ps1
 ```
 
-## Docker
+That script creates `.venv`, installs dependencies, and creates `.env` from `.env.example` if needed.
+
+Run the app:
+
+```bash
+llamaclaw
+```
+
+On Windows PowerShell, you can also use:
+
+```powershell
+.\scripts\run_local.ps1
+```
+
+This branch is meant to run directly on your machine, with the local `data/` folder preserving memory over time.
+
+You can also launch it as a Python module:
+
+```bash
+python -m app
+```
+
+## Optional Docker
 
 ```bash
 docker build -t llamaclaw .

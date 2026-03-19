@@ -110,8 +110,10 @@ async def test_self_review_can_be_disabled() -> None:
 async def test_command_decision_uses_model_output() -> None:
     bot = object.__new__(LlamaClawBot)
     bot.ollama_client = FakeOllamaClient(['{"cmd":"research","search":"bowtiedcyber","url":null,"reason":"user asked for investigation"}'])
+    bot.context_assembler = ContextAssembler("system prompt", chat_window_size=20)
+    profile = UserProfile(chat_id="1", onboarding_complete=True, active_projects=["BowTiedCyber"])
 
-    decision = await bot._decide_command("Do research on bowtiedcyber and see what you find")
+    decision = await bot._decide_command("Do research on bowtiedcyber and see what you find", profile, [])
 
     assert decision == CommandDecision(cmd="research", search="bowtiedcyber", url=None, reason="user asked for investigation")
 
@@ -119,8 +121,27 @@ async def test_command_decision_uses_model_output() -> None:
 async def test_command_decision_falls_back_to_url_research() -> None:
     bot = object.__new__(LlamaClawBot)
     bot.ollama_client = FakeOllamaClient(["not json"])
+    bot.context_assembler = ContextAssembler("system prompt", chat_window_size=20)
 
-    decision = await bot._decide_command("Tell me about https://example.com")
+    decision = await bot._decide_command("Tell me about https://example.com", UserProfile(chat_id="1"), [])
 
     assert decision.cmd == "research"
     assert decision.url == "https://example.com"
+
+
+async def test_command_decision_prompt_includes_profile_and_recent_context() -> None:
+    bot = object.__new__(LlamaClawBot)
+    bot.ollama_client = FakeOllamaClient(['{"cmd":"chat","search":null,"url":null,"reason":"follow-up planning"}'])
+    bot.context_assembler = ContextAssembler("system prompt", chat_window_size=20)
+    profile = UserProfile(chat_id="1", onboarding_complete=True, active_projects=["My Agency"], primary_goals=["Grow revenue"])
+    conversation = [
+        ChatMessage(id="1", role="user", text="I run My Agency"),
+        ChatMessage(id="2", role="assistant", text="Got it."),
+    ]
+
+    decision = await bot._decide_command("what now?", profile, conversation)
+
+    assert decision.cmd == "chat"
+    planner_system_messages = bot.ollama_client.calls[0]
+    assert any("My Agency" in message["content"] for message in planner_system_messages)
+    assert any("what now?" == message["content"] for message in planner_system_messages if message["role"] == "user")
