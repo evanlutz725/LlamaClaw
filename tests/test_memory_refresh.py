@@ -62,3 +62,27 @@ async def test_refresh_trigger_creates_background_task(tmp_path: Path) -> None:
 
     state = refresh_repo.load()
     assert state.messages_since_refresh in {0, 2}
+
+
+def test_reset_chat_context_resets_offset_only(tmp_path: Path) -> None:
+    store = JsonFileStore()
+    conversations = ConversationRepository(tmp_path, store)
+    memory_repo = MemoryRepository(tmp_path, store)
+    refresh_repo = RefreshStateRepository(tmp_path, store)
+    scorer = MemoryScorer(retention_days=30, min_weight=0.2)
+    worker = MemoryRefreshWorker(
+        conversations=conversations,
+        memory_repo=memory_repo,
+        refresh_repo=refresh_repo,
+        scorer=scorer,
+        refresh_every_messages=2,
+    )
+
+    state = refresh_repo.load()
+    state.last_processed_offsets["123"] = 9
+    refresh_repo.save(state)
+
+    worker.reset_chat_context("123")
+    updated_state = refresh_repo.load()
+
+    assert updated_state.last_processed_offsets["123"] == 0

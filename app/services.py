@@ -178,6 +178,11 @@ class MemoryRefreshWorker:
                 return
             self._pending_task = asyncio.create_task(self.refresh())
 
+    def reset_chat_context(self, chat_id: str) -> None:
+        state = self._refresh_repo.load()
+        state.last_processed_offsets[chat_id] = 0
+        self._refresh_repo.save(state)
+
     async def refresh(self) -> None:
         async with self._refresh_lock:
             state = self._refresh_repo.load()

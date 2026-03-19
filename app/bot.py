@@ -48,6 +48,8 @@ class LlamaClawBot:
 
         self.application = Application.builder().token(settings.telegram_bot_token).build()
         self.application.add_handler(CommandHandler("start", self.start))
+        self.application.add_handler(CommandHandler("clearcontext", self.clear_context))
+        self.application.add_handler(CommandHandler("resetcontext", self.clear_context))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -61,7 +63,19 @@ class LlamaClawBot:
             self.onboarding_repo.save(onboarding_state)
             await update.message.reply_text(OnboardingService.first_prompt())
             return
-        await update.message.reply_text("LlamaClaw is online. Send a message or start with 'research:' for web-backed replies.")
+        await update.message.reply_text(
+            "LlamaClaw is online. Send a message to research something, or use /clearcontext to wipe only the rolling chat context."
+        )
+
+    async def clear_context(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message or not update.effective_chat:
+            return
+        chat_id = str(update.effective_chat.id)
+        self.conversation_repo.save(type(self.conversation_repo.load(chat_id))(chat_id=chat_id))
+        self.refresh_worker.reset_chat_context(chat_id)
+        await update.message.reply_text(
+            "Conversation context cleared for this chat. Your onboarding profile and long-term learned memory were kept."
+        )
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.effective_chat:
