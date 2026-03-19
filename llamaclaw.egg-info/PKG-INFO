@@ -4,6 +4,7 @@ Version: 0.1.0
 Summary: Lightweight Telegram chatbot and research assistant for Ollama.
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
+Requires-Dist: beautifulsoup4<5.0,>=4.12
 Requires-Dist: fastapi<1.0,>=0.115
 Requires-Dist: httpx<1.0,>=0.28
 Requires-Dist: pydantic<3.0,>=2.10
@@ -23,7 +24,10 @@ LlamaClaw is a lightweight Telegram chatbot and research assistant designed to w
 - Telegram bot with polling by default and webhook support via FastAPI
 - Ollama integration with `llama3.2` as the default model
 - Brave Search integration for research queries
+- Self-review pass that checks draft answers before they are sent
+- Deeper research context by scraping top search results for extra evidence
 - File-backed conversation history and unified memory context
+- User onboarding flow that captures goals, preferences, and boundaries
 - Async memory refresh every 10 persisted messages by default
 
 ## Environment
@@ -41,6 +45,7 @@ Set these environment variables before starting the app:
 - `MEMORY_MIN_WEIGHT`
 - `MEMORY_RETENTION_DAYS`
 - `RUN_MODE` values: `polling` or `webhook`
+- `WEBHOOK_URL`
 - `WEBHOOK_SECRET`
 - `WEBHOOK_PATH`
 

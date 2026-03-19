@@ -29,6 +29,16 @@ class ContextAssembler:
             if profile_summary:
                 system_content += "\n\nKnown user profile:\n" + profile_summary
 
+        system_content += (
+            "\n\nRuntime capabilities:\n"
+            "- You can access the internet through Brave Search when the app supplies search results.\n"
+            "- You can inspect multiple pages from the same website when the app supplies crawled site pages.\n"
+            "- If Brave results or page excerpts are present, say you used web research and rely on those results.\n"
+            "- Do not claim you cannot browse the web when research context is available.\n"
+            "- You have persistent local memory through saved conversation files, onboarding profile data, and the unified context file.\n"
+            "- Be honest about the difference between direct web results you were given and anything you infer from them."
+        )
+
         messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
 
         active_items = [item for item in memory.items if item.status == "active" and item.combined_weight > 0]

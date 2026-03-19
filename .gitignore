@@ -1,0 +1,15 @@
+.env
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+data/conversations/
+data/memory/
+data/profiles/
+data/state/
+!data/.gitkeep
+!data/system/
+!data/system/.gitkeep
+!data/system/system_prompt.txt

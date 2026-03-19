@@ -16,3 +16,4 @@ llamaclaw.egg-info/requires.txt
 llamaclaw.egg-info/top_level.txt
 tests/test_context.py
 tests/test_memory_refresh.py
+tests/test_onboarding.py

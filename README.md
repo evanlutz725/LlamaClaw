@@ -7,6 +7,9 @@ LlamaClaw is a lightweight Telegram chatbot and research assistant designed to w
 - Telegram bot with polling by default and webhook support via FastAPI
 - Ollama integration with `llama3.2` as the default model
 - Brave Search integration for research queries
+- Self-review pass that checks draft answers before they are sent
+- AI command analysis to decide when to research and what target to use
+- Deeper research context by scraping top search results and crawling a target site for extra evidence
 - File-backed conversation history and unified memory context
 - User onboarding flow that captures goals, preferences, and boundaries
 - Async memory refresh every 10 persisted messages by default
@@ -43,3 +46,13 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 docker build -t llamaclaw .
 docker run --rm -p 8000:8000 --env-file .env llamaclaw
 ```
+
+## Docker Compose With Persistent Memory
+
+Use Docker Compose to keep learned memory on your machine across container rebuilds and restarts:
+
+```bash
+docker compose up --build
+```
+
+The local `data/` folder is mounted into `/app/data`, so profiles, conversations, and long-term memory persist outside the container.

@@ -50,6 +50,13 @@ class SearchResult(BaseModel):
     title: str
     url: str
     snippet: str
+    page_excerpt: str | None = None
+
+
+class SitePage(BaseModel):
+    url: str
+    title: str | None = None
+    excerpt: str
 
 
 class MemoryCandidate(BaseModel):
@@ -82,3 +89,10 @@ class OnboardingState(BaseModel):
     answers: dict[str, str] = Field(default_factory=dict)
     completed: bool = False
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class CommandDecision(BaseModel):
+    cmd: Literal["chat", "research"] = "chat"
+    search: str | None = None
+    url: str | None = None
+    reason: str | None = None
