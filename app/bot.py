@@ -7,6 +7,7 @@ import re
 import sys
 import tempfile
 import uuid
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -279,6 +280,7 @@ class LlamaClawBot:
         profile_summary = self.context_assembler._build_profile_summary(profile) if profile else ""
         recent_context = "\n".join(f"{message.role}: {message.text}" for message in conversation[-6:])
         intent_type = self._classify_research_intent(text, command)
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
         planner_messages = [
             {
                 "role": "system",
@@ -290,6 +292,7 @@ class LlamaClawBot:
                     "If a specific site should be crawled, include it in crawl_urls. "
                     "Use the user profile to resolve references like my business or my company. "
                     "For news requests, prioritize fresh news queries around companies, labs, products, and major developments rather than generic business template searches. "
+                    f"Today's date is {today}. Use the current date and current year instead of older default years. "
                     "Do not include markdown fences or commentary."
                 ),
             },
@@ -347,6 +350,7 @@ class LlamaClawBot:
         return search_results[0].url if search_results else None
 
     def _fallback_research_queries(self, base_query: str, profile, intent_type: str) -> list[str]:
+        current_year = datetime.now().year
         if intent_type == "news":
             queries = [
                 f"{base_query} news today",
@@ -359,6 +363,7 @@ class LlamaClawBot:
                 f"Google DeepMind latest news",
                 f"Meta AI latest news",
                 f"NVIDIA AI latest news",
+                f"AI breakthroughs {current_year} latest news",
             ]
         elif intent_type == "company":
             queries = [
@@ -825,6 +830,7 @@ class LlamaClawBot:
         return final_text
 
     async def _build_research_outline(self, prompt_messages: list[dict[str, str]], latest_user_request: str) -> ResearchOutline:
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
         outline_messages = [
             *prompt_messages,
             {
@@ -835,6 +841,7 @@ class LlamaClawBot:
                     "The title should be concise and human-readable. "
                     "The sections should be 4 to 7 concrete headings that together answer the user's request thoroughly. "
                     "Prefer headings that stand alone well. "
+                    f"Today's date is {today}. Prefer current-year framing for time-sensitive requests. "
                     "For news-style requests, prefer headings like what changed, the biggest announcements, company moves, what matters now, and sources."
                 ),
             },
@@ -865,6 +872,7 @@ class LlamaClawBot:
         title: str,
         section: str,
     ) -> str:
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
         section_messages = [
             *prompt_messages,
             {
@@ -872,25 +880,27 @@ class LlamaClawBot:
                 "content": (
                     "Write one section of a research report in plain text. "
                     "Use clean human-readable formatting with short paragraphs and bullet points where they improve clarity. "
-                "Do not use markdown emphasis, bold, italics, decorative formatting, or hype. "
-                "Do not write in an excited, breathless, or promotional tone. "
-                "Avoid all-caps emphasis and avoid lines like 'X is revolutionary'. "
-                "Do not repeat the section title in the body. "
-                "This section must stand on its own and still fit the full report. "
-                "Use only the supplied research context and conversation context. "
-                "Do not rely on background knowledge or older remembered facts outside the supplied packet. "
-                "If the supplied packet does not support a claim, leave it out. "
-                "Be detailed and concrete rather than terse. "
-                "Prefer this structure when it fits: "
-                "1. a short opening summary paragraph, "
-                "2. 3 to 6 bullet points with the most relevant developments, including dates, names, and specifics when available, "
-                "3. a short 'Why this matters' paragraph, "
-                "4. a short 'Sources used' line naming the strongest sources for that section. "
-                "For time-sensitive questions, explicitly mention dates and prioritize the most recent developments. "
-                "For news requests, prefer developments from the last 30 days when available and avoid padding with older evergreen milestones. "
-                "Only include claims grounded in the provided research packet."
-            ),
-        },
+                    "Do not use markdown emphasis, bold, italics, decorative formatting, or hype. "
+                    "Do not write in an excited, breathless, or promotional tone. "
+                    "Avoid all-caps emphasis and avoid lines like 'X is revolutionary'. "
+                    "Do not repeat the section title in the body. "
+                    "This section must stand on its own and still fit the full report. "
+                    "Use only the supplied research context and conversation context. "
+                    "Do not rely on background knowledge or older remembered facts outside the supplied packet. "
+                    "If the supplied packet does not support a claim, leave it out. "
+                    "Be detailed and concrete rather than terse. "
+                    "Prefer this structure when it fits: "
+                    "1. a short opening summary paragraph, "
+                    "2. 3 to 6 bullet points with the most relevant developments, including dates, names, and specifics when available, "
+                    "3. a short 'Why this matters' paragraph, "
+                    "4. a short 'Sources used' line naming the strongest sources for that section. "
+                    f"Today's date is {today}. Use the current year and current date as the default temporal frame. "
+                    "Do not open with an older year unless the evidence explicitly supports it and it is still relevant. "
+                    "For time-sensitive questions, explicitly mention dates and prioritize the most recent developments. "
+                    "For news requests, prefer developments from the last 30 days when available and avoid padding with older evergreen milestones. "
+                    "Only include claims grounded in the provided research packet."
+                ),
+            },
             {
                 "role": "user",
                 "content": (
