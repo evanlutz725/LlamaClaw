@@ -27,6 +27,7 @@ from app.services import ContextAssembler, MemoryRefreshWorker, OnboardingServic
 from app.storage import JsonFileStore
 
 LOGGER = logging.getLogger(__name__)
+TELEGRAM_MESSAGE_LIMIT = 3900
 
 
 class LlamaClawBot:
@@ -219,7 +220,7 @@ class LlamaClawBot:
         conversation.messages.append(ChatMessage(id=str(uuid.uuid4()), role="assistant", text=response_text))
         self.conversation_repo.save(conversation)
         self.refresh_worker.record_message_and_maybe_refresh(chat_id)
-        await update.message.reply_text(response_text)
+        await self._reply_in_chunks(update, response_text)
 
     async def _decide_command(self, text: str, profile, conversation: list[ChatMessage]) -> CommandDecision:
         direct_url = self._extract_url(text)
@@ -584,11 +585,19 @@ class LlamaClawBot:
                 "role": "system",
                 "content": (
                     "Write one section of a research report in plain text. "
-                    "Do not use markdown emphasis, bold, italics, bullets unless truly necessary, or decorative formatting. "
-                    "Write flowing, human-readable prose. "
+                    "Use clean human-readable formatting with short paragraphs and bullet points where they improve clarity. "
+                    "Do not use markdown emphasis, bold, italics, decorative formatting, or hype. "
+                    "Do not write in an excited, breathless, or promotional tone. "
+                    "Avoid all-caps emphasis and avoid lines like 'X is revolutionary'. "
                     "This section must stand on its own and still fit the full report. "
                     "Use only the supplied research context and conversation context. "
-                    "Be detailed and concrete rather than terse."
+                    "Be detailed and concrete rather than terse. "
+                    "Prefer this structure when it fits: "
+                    "1. a short opening summary paragraph, "
+                    "2. 3 to 6 bullet points with the most relevant developments, including dates, names, and specifics when available, "
+                    "3. a short 'Why this matters' paragraph, "
+                    "4. a short 'Sources used' line naming the strongest sources for that section. "
+                    "Only include claims grounded in the provided research packet."
                 ),
             },
             {
@@ -625,11 +634,47 @@ class LlamaClawBot:
     def _clean_plain_text(text: str) -> str:
         cleaned = text.replace("**", "").replace("__", "").replace("```", "")
         cleaned = re.sub(r"^\s*#+\s*", "", cleaned, flags=re.MULTILINE)
+        cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
         return cleaned.strip()
 
     @staticmethod
     def _plain_text_heading(text: str) -> str:
         return text.strip()
+
+    async def _reply_in_chunks(self, update: Update, text: str) -> None:
+        if not update.message:
+            return
+        for chunk in self._split_text_for_telegram(text):
+            await update.message.reply_text(chunk)
+
+    @staticmethod
+    def _split_text_for_telegram(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
+        stripped = text.strip()
+        if len(stripped) <= limit:
+            return [stripped] if stripped else [""]
+
+        chunks: list[str] = []
+        remaining = stripped
+        while remaining:
+            if len(remaining) <= limit:
+                chunks.append(remaining)
+                break
+
+            split_at = remaining.rfind("\n\n", 0, limit)
+            if split_at == -1:
+                split_at = remaining.rfind("\n", 0, limit)
+            if split_at == -1:
+                split_at = remaining.rfind(" ", 0, limit)
+            if split_at == -1 or split_at < limit // 3:
+                split_at = limit
+
+            chunk = remaining[:split_at].strip()
+            if chunk:
+                chunks.append(chunk)
+            remaining = remaining[split_at:].lstrip()
+
+        return chunks or [stripped]
 
 
 def ensure_default_system_prompt(settings: Settings, store: JsonFileStore) -> str:

@@ -194,12 +194,24 @@ def test_prompt_summary_keeps_recent_message_previews() -> None:
     assert summary["messages"][-1]["preview"] == "assistant draft"
 
 
+def test_split_text_for_telegram_chunks_long_output() -> None:
+    text = ("Section one\n\n" + ("A" * 2500) + "\n\nSection two\n\n" + ("B" * 2500)).strip()
+
+    chunks = LlamaClawBot._split_text_for_telegram(text, limit=3000)
+
+    assert len(chunks) == 2
+    assert all(len(chunk) <= 3000 for chunk in chunks)
+    assert "Section one" in "".join(chunks)
+    assert "Section two" in "".join(chunks)
+
+
 def test_clean_plain_text_removes_markdown_emphasis() -> None:
-    cleaned = LlamaClawBot._clean_plain_text("**Bold**\n## Heading\nPlain text")
+    cleaned = LlamaClawBot._clean_plain_text("**Bold**\n## Heading\nPlain text\n\n\nExtra")
 
     assert "**" not in cleaned
     assert "##" not in cleaned
     assert "Bold" in cleaned
+    assert "\n\n\n" not in cleaned
 
 
 async def test_build_research_outline_uses_model_output() -> None:
