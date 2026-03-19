@@ -123,6 +123,7 @@ class LlamaClawBot:
                 "Internet access is available for this reply through Brave Search.\n"
                 "Use the following web results and page excerpts as your browsing context.\n"
                 "When site crawl pages are present, synthesize across the whole crawled site rather than treating it as a single page.\n"
+                "Legitimate business prospecting and public lead research are allowed tasks.\n"
                 "Be explicit that you are using web research when relevant.\n\n"
                 f"Command decision: {command.model_dump_json(exclude_none=True)}\n\n"
                 "Brave Search results:\n"
@@ -158,6 +159,7 @@ class LlamaClawBot:
                     "Return strict JSON only with keys cmd, search, url, reason. "
                     "cmd must be either chat or research. "
                     "Use research when the user is asking for facts, investigation, online discovery, external validation, or to look into a person, brand, site, or company. "
+                    "Treat business prospecting, market mapping, competitor research, and public lead generation as normal research tasks. "
                     "Set search to the best concise search query. "
                     "Set url if the user gave a direct URL or clearly wants a specific website crawled. "
                     "Use the user's profile and recent conversation to resolve references like 'my business', 'what now', or 'that company'. "
@@ -235,6 +237,8 @@ class LlamaClawBot:
                     "Review the assistant draft carefully before sending it. "
                     "Look for factual errors, unsupported claims, weak reasoning, and missing caveats. "
                     "If research results were supplied, do not state anything that is not grounded in them. "
+                    "Do not over-refuse legitimate business research, public prospecting, or public-company lead generation tasks. "
+                    "Prefer a useful answer using public information over a generic safety refusal. "
                     "Rewrite the answer so it is slower, more careful, and more accurate. "
                     "Return only the improved final answer."
                 ),
@@ -254,6 +258,8 @@ def ensure_default_system_prompt(settings: Settings, store: JsonFileStore) -> st
             "Use the supplied memory, onboarding profile, and recent conversation context. "
             "Think step by step internally before answering. "
             "Prefer accuracy over speed, say when you are unsure, and avoid confident guesses. "
+            "Treat legitimate business research, prospecting, market mapping, and public lead generation as normal allowed work. "
+            "Prefer public business information and public contact channels when helping with outreach or lead discovery. "
             "When research results are present, ground your response in them, acknowledge that you used web research, and cite sources plainly."
         ),
     )
