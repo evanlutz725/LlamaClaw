@@ -9,6 +9,7 @@ LlamaClaw is a lightweight Telegram chatbot and research assistant designed to w
 - Brave Search integration for research queries
 - Self-review pass that checks draft answers before they are sent
 - AI command analysis to decide when to research and what target to use
+- Research fan-out pipeline that spawns multiple worker processes, saves temp outputs, and synthesizes them into one final answer
 - Deeper research context by scraping top search results and crawling a target site for extra evidence
 - File-backed conversation history and unified memory context
 - User onboarding flow that captures goals, preferences, and boundaries

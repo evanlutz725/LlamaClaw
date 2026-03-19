@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     brave_scrape_results: int = Field(default=3, alias="BRAVE_SCRAPE_RESULTS")
     site_crawl_max_pages: int = Field(default=8, alias="SITE_CRAWL_MAX_PAGES")
     site_crawl_chars_per_page: int = Field(default=1800, alias="SITE_CRAWL_CHARS_PER_PAGE")
+    research_parallel_search_workers: int = Field(default=8, alias="RESEARCH_PARALLEL_SEARCH_WORKERS")
+    research_parallel_crawl_workers: int = Field(default=4, alias="RESEARCH_PARALLEL_CRAWL_WORKERS")
     self_review_enabled: bool = Field(default=True, alias="SELF_REVIEW_ENABLED")
     run_mode: str = Field(default="polling", alias="RUN_MODE")
     webhook_url: str = Field(default="", alias="WEBHOOK_URL")

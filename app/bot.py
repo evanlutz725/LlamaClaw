@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import sys
+import tempfile
 import uuid
+from pathlib import Path
 from urllib.parse import urlparse
 
 from telegram import Update
@@ -11,7 +15,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from app.clients import BraveSearchClient, OllamaClient
 from app.config import Settings
-from app.models import ChatMessage, CommandDecision
+from app.models import ChatMessage, CommandDecision, ResearchPlan
 from app.repositories import ConversationRepository, MemoryRepository, OnboardingRepository, UserProfileRepository
 from app.services import ContextAssembler, MemoryRefreshWorker, OnboardingService
 from app.storage import JsonFileStore
@@ -100,36 +104,20 @@ class LlamaClawBot:
         search_results = []
         crawled_pages = []
         if command.cmd == "research":
-            research_query = command.search or self._research_query(user_text)
-            search_results = await self.brave_client.search(
-                research_query,
-                count=self.settings.brave_search_results,
-            )
-            search_results = await self.brave_client.enrich_with_page_content(
-                search_results,
-                max_fetch=self.settings.brave_scrape_results,
-                max_chars=self.settings.site_crawl_chars_per_page,
-            )
-            crawl_target = command.url or self._select_crawl_target(search_results)
-            if crawl_target:
-                crawled_pages = await self.brave_client.crawl_site(
-                    crawl_target,
-                    max_pages=self.settings.site_crawl_max_pages,
-                    max_chars=self.settings.site_crawl_chars_per_page,
-                )
-            formatted_results = self.brave_client.format_results(search_results)
-            formatted_pages = self.brave_client.format_site_pages(crawled_pages)
+            research_plan = await self._build_research_plan(user_text, command, profile, conversation.messages)
+            aggregated = await self._run_research_workers(research_plan)
+            search_results = aggregated["search_results"]
+            crawled_pages = aggregated["crawled_pages"]
             research_context = (
-                "Internet access is available for this reply through Brave Search.\n"
-                "Use the following web results and page excerpts as your browsing context.\n"
+                "Internet access is available for this reply through a multi-worker research pipeline.\n"
+                "The app spawned independent research workers, saved their outputs to temp files, and aggregated them here.\n"
+                "Use the following research packet as your browsing context.\n"
                 "When site crawl pages are present, synthesize across the whole crawled site rather than treating it as a single page.\n"
                 "Legitimate business prospecting and public lead research are allowed tasks.\n"
                 "Be explicit that you are using web research when relevant.\n\n"
-                f"Command decision: {command.model_dump_json(exclude_none=True)}\n\n"
-                "Brave Search results:\n"
-                + formatted_results
-                + "\n\nCrawled site pages:\n"
-                + formatted_pages
+                f"Command decision: {command.model_dump_json(exclude_none=True)}\n"
+                f"Research plan: {research_plan.model_dump_json(exclude_none=True)}\n\n"
+                + aggregated["context"]
             )
 
         memory = self.memory_repo.load()
@@ -192,6 +180,50 @@ class LlamaClawBot:
                 return CommandDecision(cmd="research", search=self._research_query(text), reason="fallback_keyword_detected")
             return CommandDecision(cmd="chat", reason="fallback_chat")
 
+    async def _build_research_plan(self, text: str, command: CommandDecision, profile, conversation: list[ChatMessage]) -> ResearchPlan:
+        profile_summary = self.context_assembler._build_profile_summary(profile) if profile else ""
+        recent_context = "\n".join(f"{message.role}: {message.text}" for message in conversation[-6:])
+        planner_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You create a research fan-out plan for a local research bot. "
+                    "Return strict JSON only with keys search_queries, crawl_urls, goal. "
+                    "Generate multiple focused search queries that cover different angles of the task. "
+                    "Prefer 6 to 12 search queries. "
+                    "If a specific site should be crawled, include it in crawl_urls. "
+                    "Use the user profile to resolve references like my business or my company. "
+                    "Do not include markdown fences or commentary."
+                ),
+            },
+            {
+                "role": "system",
+                "content": (
+                    "User profile context:\n"
+                    + (profile_summary or "- No completed onboarding profile yet.")
+                    + "\n\nRecent conversation:\n"
+                    + (recent_context or "- No recent messages.")
+                ),
+            },
+            {"role": "user", "content": text},
+        ]
+        try:
+            raw = await self.ollama_client.chat(planner_messages)
+            data = self._extract_json_object(raw)
+            plan = ResearchPlan.model_validate(data)
+            if command.search and command.search not in plan.search_queries:
+                plan.search_queries.insert(0, command.search)
+            if command.url and command.url not in plan.crawl_urls:
+                plan.crawl_urls.insert(0, command.url)
+            return plan
+        except Exception:
+            base_query = command.search or self._research_query(text)
+            return ResearchPlan(
+                goal=base_query,
+                search_queries=self._fallback_research_queries(base_query, profile),
+                crawl_urls=[command.url] if command.url else [],
+            )
+
     @staticmethod
     def _research_query(text: str) -> str:
         if ":" in text:
@@ -214,13 +246,123 @@ class LlamaClawBot:
     def _select_crawl_target(search_results: list) -> str | None:
         return search_results[0].url if search_results else None
 
+    def _fallback_research_queries(self, base_query: str, profile) -> list[str]:
+        queries = [
+            base_query,
+            f"{base_query} official website",
+            f"{base_query} services",
+            f"{base_query} team founder",
+            f"{base_query} pricing offer",
+            f"{base_query} reviews case study",
+            f"{base_query} linkedin",
+            f"{base_query} contact",
+        ]
+        if profile and profile.active_projects:
+            queries.extend(f"{project} {base_query}" for project in profile.active_projects[:2])
+        deduped: list[str] = []
+        for query in queries:
+            if query and query not in deduped:
+                deduped.append(query)
+        return deduped[: self.settings.research_parallel_search_workers]
+
+    async def _run_research_workers(self, plan: ResearchPlan) -> dict:
+        work_dir = Path(tempfile.mkdtemp(prefix="llamaclaw-research-"))
+        search_queries = plan.search_queries[: self.settings.research_parallel_search_workers]
+        crawl_urls = plan.crawl_urls[: self.settings.research_parallel_crawl_workers]
+        tasks = []
+        for index, query in enumerate(search_queries):
+            output_path = work_dir / f"search_{index}.json"
+            tasks.append(
+                self._spawn_worker(
+                    mode="search",
+                    output_path=output_path,
+                    query=query,
+                )
+            )
+        for index, url in enumerate(crawl_urls):
+            output_path = work_dir / f"crawl_{index}.json"
+            tasks.append(
+                self._spawn_worker(
+                    mode="crawl",
+                    output_path=output_path,
+                    url=url,
+                )
+            )
+
+        if not tasks and plan.goal:
+            output_path = work_dir / "search_0.json"
+            tasks.append(self._spawn_worker(mode="search", output_path=output_path, query=plan.goal))
+
+        output_paths = await asyncio.gather(*tasks)
+        aggregated_summaries: list[str] = []
+        search_results = []
+        crawled_pages = []
+
+        for output_path in output_paths:
+            if not output_path.exists():
+                continue
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            summary = payload.get("summary", "")
+            if summary:
+                aggregated_summaries.append(f"{payload.get('worker_type', 'worker')}::{payload.get('target', '')}\n{summary}")
+            if payload.get("worker_type") == "search":
+                search_results.extend(payload.get("results", []))
+            elif payload.get("worker_type") == "crawl":
+                crawled_pages.extend(payload.get("pages", []))
+
+        context = (
+            "Worker outputs:\n"
+            + "\n\n".join(aggregated_summaries)
+            + ("\n\nNo worker output captured." if not aggregated_summaries else "")
+        )
+        return {
+            "context": context,
+            "search_results": search_results,
+            "crawled_pages": crawled_pages,
+        }
+
+    async def _spawn_worker(self, mode: str, output_path: Path, query: str | None = None, url: str | None = None) -> Path:
+        command = [
+            sys.executable,
+            "-m",
+            "app.research_worker",
+            mode,
+            "--api-key",
+            self.settings.brave_api_key,
+            "--output",
+            str(output_path),
+            "--count",
+            str(self.settings.brave_search_results),
+            "--scrape-count",
+            str(self.settings.brave_scrape_results),
+            "--max-pages",
+            str(self.settings.site_crawl_max_pages),
+            "--max-chars",
+            str(self.settings.site_crawl_chars_per_page),
+        ]
+        if query:
+            command.extend(["--query", query])
+        if url:
+            command.extend(["--url", url])
+
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await process.wait()
+        return output_path
+
     @staticmethod
     def _append_sources(response_text: str, search_results: list) -> str:
         if not search_results:
             return response_text
         source_lines = ["", "Sources:"]
         for result in search_results[:5]:
-            source_lines.append(f"- {result.title}: {result.url}")
+            if isinstance(result, dict):
+                source_lines.append(f"- {result.get('title', 'Untitled')}: {result.get('url', '')}")
+            else:
+                source_lines.append(f"- {result.title}: {result.url}")
         return response_text.strip() + "\n" + "\n".join(source_lines)
 
     async def _generate_response(self, prompt_messages: list[dict[str, str]], search_results: list) -> str:

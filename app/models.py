@@ -96,3 +96,16 @@ class CommandDecision(BaseModel):
     search: str | None = None
     url: str | None = None
     reason: str | None = None
+
+
+class ResearchPlan(BaseModel):
+    search_queries: list[str] = Field(default_factory=list)
+    crawl_urls: list[str] = Field(default_factory=list)
+    goal: str | None = None
+
+
+class WorkerResult(BaseModel):
+    worker_type: Literal["search", "crawl"]
+    target: str
+    output_path: str
+    summary: str
