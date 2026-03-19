@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.models import ConversationRecord, MemoryStore, OnboardingState, RefreshState, UserProfile
+from app.models import ChatSettings, ConversationRecord, MemoryStore, OnboardingState, RefreshState, UserProfile
 from app.storage import JsonFileStore
 
 
@@ -77,3 +77,18 @@ class OnboardingRepository:
 
     def save(self, state: OnboardingState) -> None:
         self._store.write_model(self._path(state.chat_id), state)
+
+
+class ChatSettingsRepository:
+    def __init__(self, data_dir: Path, store: JsonFileStore) -> None:
+        self.data_dir = data_dir
+        self._store = store
+
+    def _path(self, chat_id: str) -> Path:
+        return self.data_dir / "state" / "chat_settings" / f"{chat_id}.json"
+
+    def load(self, chat_id: str) -> ChatSettings:
+        return self._store.read_model(self._path(chat_id), ChatSettings, ChatSettings(chat_id=chat_id))
+
+    def save(self, settings: ChatSettings) -> None:
+        self._store.write_model(self._path(settings.chat_id), settings)

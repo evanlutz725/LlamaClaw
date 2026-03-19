@@ -109,3 +109,10 @@ class WorkerResult(BaseModel):
     target: str
     output_path: str
     summary: str
+
+
+class ChatSettings(BaseModel):
+    chat_id: str
+    debug_enabled: bool = False
+    deep_thinking_enabled: bool = False
+    updated_at: datetime = Field(default_factory=utc_now)

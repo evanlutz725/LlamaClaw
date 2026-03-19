@@ -88,8 +88,9 @@ async def test_self_review_runs_second_pass_when_enabled() -> None:
     bot = object.__new__(LlamaClawBot)
     bot.settings = SimpleNamespace(self_review_enabled=True)
     bot.ollama_client = FakeOllamaClient(["draft answer", "reviewed answer"])
+    chat_settings = SimpleNamespace(debug_enabled=False)
 
-    result = await bot._generate_response([{"role": "system", "content": "prompt"}], [])
+    result = await bot._generate_response([{"role": "system", "content": "prompt"}], [], chat_settings)
 
     assert result == "reviewed answer"
     assert len(bot.ollama_client.calls) == 2
@@ -100,8 +101,9 @@ async def test_self_review_can_be_disabled() -> None:
     bot = object.__new__(LlamaClawBot)
     bot.settings = SimpleNamespace(self_review_enabled=False)
     bot.ollama_client = FakeOllamaClient(["draft answer"])
+    chat_settings = SimpleNamespace(debug_enabled=False)
 
-    result = await bot._generate_response([{"role": "system", "content": "prompt"}], [])
+    result = await bot._generate_response([{"role": "system", "content": "prompt"}], [], chat_settings)
 
     assert result == "draft answer"
     assert len(bot.ollama_client.calls) == 1
@@ -111,6 +113,7 @@ async def test_self_review_targets_latest_user_request() -> None:
     bot = object.__new__(LlamaClawBot)
     bot.settings = SimpleNamespace(self_review_enabled=True)
     bot.ollama_client = FakeOllamaClient(["draft answer", "reviewed answer"])
+    chat_settings = SimpleNamespace(debug_enabled=False)
 
     await bot._generate_response(
         [
@@ -118,6 +121,7 @@ async def test_self_review_targets_latest_user_request() -> None:
             {"role": "user", "content": "tell me about the recent changes with AI"},
         ],
         [],
+        chat_settings,
     )
 
     review_call = bot.ollama_client.calls[1]
@@ -166,3 +170,16 @@ async def test_command_decision_prompt_includes_profile_and_recent_context() -> 
     planner_system_messages = bot.ollama_client.calls[0]
     assert any("My Agency" in message["content"] for message in planner_system_messages)
     assert any("what now?" == message["content"] for message in planner_system_messages if message["role"] == "user")
+
+
+def test_prompt_summary_keeps_recent_message_previews() -> None:
+    summary = LlamaClawBot._summarize_prompt(
+        [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "user question"},
+            {"role": "assistant", "content": "assistant draft"},
+        ]
+    )
+
+    assert summary["message_count"] == 3
+    assert summary["messages"][-1]["preview"] == "assistant draft"

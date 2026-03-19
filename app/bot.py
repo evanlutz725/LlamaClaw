@@ -15,8 +15,14 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from app.clients import BraveSearchClient, OllamaClient
 from app.config import Settings
-from app.models import ChatMessage, CommandDecision, ResearchPlan
-from app.repositories import ConversationRepository, MemoryRepository, OnboardingRepository, UserProfileRepository
+from app.models import ChatMessage, ChatSettings, CommandDecision, ResearchPlan
+from app.repositories import (
+    ChatSettingsRepository,
+    ConversationRepository,
+    MemoryRepository,
+    OnboardingRepository,
+    UserProfileRepository,
+)
 from app.services import ContextAssembler, MemoryRefreshWorker, OnboardingService
 from app.storage import JsonFileStore
 
@@ -31,6 +37,7 @@ class LlamaClawBot:
         memory_repo: MemoryRepository,
         profile_repo: UserProfileRepository,
         onboarding_repo: OnboardingRepository,
+        chat_settings_repo: ChatSettingsRepository,
         context_assembler: ContextAssembler,
         ollama_client: OllamaClient,
         brave_client: BraveSearchClient,
@@ -41,6 +48,7 @@ class LlamaClawBot:
         self.memory_repo = memory_repo
         self.profile_repo = profile_repo
         self.onboarding_repo = onboarding_repo
+        self.chat_settings_repo = chat_settings_repo
         self.context_assembler = context_assembler
         self.ollama_client = ollama_client
         self.brave_client = brave_client
@@ -48,6 +56,10 @@ class LlamaClawBot:
 
         self.application = Application.builder().token(settings.telegram_bot_token).build()
         self.application.add_handler(CommandHandler("start", self.start))
+        self.application.add_handler(CommandHandler("enable", self.enable_debug))
+        self.application.add_handler(CommandHandler("disable", self.disable_debug))
+        self.application.add_handler(CommandHandler("deepthinking", self.enable_deepthinking))
+        self.application.add_handler(CommandHandler("normalthinking", self.disable_deepthinking))
         self.application.add_handler(CommandHandler("clearcontext", self.clear_context))
         self.application.add_handler(CommandHandler("resetcontext", self.clear_context))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
@@ -67,6 +79,40 @@ class LlamaClawBot:
             "LlamaClaw is online. Send a message to research something, or use /clearcontext to wipe only the rolling chat context."
         )
 
+    async def enable_debug(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._set_chat_mode(update, debug_enabled=True, reply="Debug tracing enabled. I will post structured research traces and prompt previews in this chat.")
+
+    async def disable_debug(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._set_chat_mode(update, debug_enabled=False, reply="Debug tracing disabled.")
+
+    async def enable_deepthinking(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._set_chat_mode(
+            update,
+            deep_thinking_enabled=True,
+            reply="Deep thinking enabled. I will use much larger context, broader fan-out, and more aggressive research synthesis for this chat.",
+        )
+
+    async def disable_deepthinking(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._set_chat_mode(update, deep_thinking_enabled=False, reply="Deep thinking disabled. Returning to the standard research profile.")
+
+    async def _set_chat_mode(
+        self,
+        update: Update,
+        debug_enabled: bool | None = None,
+        deep_thinking_enabled: bool | None = None,
+        reply: str = "",
+    ) -> None:
+        if not update.message or not update.effective_chat:
+            return
+        chat_id = str(update.effective_chat.id)
+        chat_settings = self.chat_settings_repo.load(chat_id)
+        if debug_enabled is not None:
+            chat_settings.debug_enabled = debug_enabled
+        if deep_thinking_enabled is not None:
+            chat_settings.deep_thinking_enabled = deep_thinking_enabled
+        self.chat_settings_repo.save(chat_settings)
+        await update.message.reply_text(reply)
+
     async def clear_context(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.effective_chat:
             return
@@ -85,6 +131,7 @@ class LlamaClawBot:
         user_text = update.message.text or ""
         profile = self.profile_repo.load(chat_id)
         onboarding_state = self.onboarding_repo.load(chat_id)
+        chat_settings = self.chat_settings_repo.load(chat_id)
 
         if not profile.onboarding_complete:
             if onboarding_state.completed:
@@ -114,12 +161,19 @@ class LlamaClawBot:
         self.refresh_worker.record_message_and_maybe_refresh(chat_id)
 
         command = await self._decide_command(user_text, profile, conversation.messages)
+        if chat_settings.debug_enabled:
+            await self._emit_debug(update, "command", {
+                "latest_user_request": user_text,
+                "command": command.model_dump(exclude_none=True),
+            })
         research_context = None
         search_results = []
         crawled_pages = []
         if command.cmd == "research":
             research_plan = await self._build_research_plan(user_text, command, profile, conversation.messages)
-            aggregated = await self._run_research_workers(research_plan)
+            if chat_settings.debug_enabled:
+                await self._emit_debug(update, "research_plan", research_plan.model_dump(exclude_none=True))
+            aggregated = await self._run_research_workers(research_plan, chat_settings)
             search_results = aggregated["search_results"]
             crawled_pages = aggregated["crawled_pages"]
             research_context = (
@@ -133,15 +187,25 @@ class LlamaClawBot:
                 f"Research plan: {research_plan.model_dump_json(exclude_none=True)}\n\n"
                 + aggregated["context"]
             )
+            if chat_settings.debug_enabled:
+                await self._emit_debug(update, "aggregated_research", {
+                    "worker_count": aggregated["worker_count"],
+                    "search_result_count": len(search_results),
+                    "crawl_page_count": len(crawled_pages),
+                    "context_preview": aggregated["context"][:3000],
+                })
 
         memory = self.memory_repo.load()
+        chat_window_size = self.settings.chat_window_size * (4 if chat_settings.deep_thinking_enabled else 1)
         prompt_messages = self.context_assembler.build_messages(
             memory,
-            conversation.messages,
+            conversation.messages[-chat_window_size:],
             profile=profile,
             research_context=research_context,
         )
-        response_text = await self._generate_response(prompt_messages, search_results)
+        if chat_settings.debug_enabled:
+            await self._emit_debug(update, "prompt_preview", self._summarize_prompt(prompt_messages))
+        response_text = await self._generate_response(prompt_messages, search_results, chat_settings, update)
         response_text = self._append_sources(response_text, search_results)
 
         conversation.messages.append(ChatMessage(id=str(uuid.uuid4()), role="assistant", text=response_text))
@@ -279,10 +343,12 @@ class LlamaClawBot:
                 deduped.append(query)
         return deduped[: self.settings.research_parallel_search_workers]
 
-    async def _run_research_workers(self, plan: ResearchPlan) -> dict:
+    async def _run_research_workers(self, plan: ResearchPlan, chat_settings: ChatSettings) -> dict:
         work_dir = Path(tempfile.mkdtemp(prefix="llamaclaw-research-"))
-        search_queries = plan.search_queries[: self.settings.research_parallel_search_workers]
-        crawl_urls = plan.crawl_urls[: self.settings.research_parallel_crawl_workers]
+        search_limit = self.settings.research_parallel_search_workers * (3 if chat_settings.deep_thinking_enabled else 1)
+        crawl_limit = self.settings.research_parallel_crawl_workers * (3 if chat_settings.deep_thinking_enabled else 1)
+        search_queries = plan.search_queries[: search_limit]
+        crawl_urls = plan.crawl_urls[: crawl_limit]
         tasks = []
         for index, query in enumerate(search_queries):
             output_path = work_dir / f"search_{index}.json"
@@ -333,6 +399,7 @@ class LlamaClawBot:
             "context": context,
             "search_results": search_results,
             "crawled_pages": crawled_pages,
+            "worker_count": len(output_paths),
         }
 
     async def _spawn_worker(self, mode: str, output_path: Path, query: str | None = None, url: str | None = None) -> Path:
@@ -379,8 +446,16 @@ class LlamaClawBot:
                 source_lines.append(f"- {result.title}: {result.url}")
         return response_text.strip() + "\n" + "\n".join(source_lines)
 
-    async def _generate_response(self, prompt_messages: list[dict[str, str]], search_results: list) -> str:
+    async def _generate_response(
+        self,
+        prompt_messages: list[dict[str, str]],
+        search_results: list,
+        chat_settings: ChatSettings,
+        update: Update | None = None,
+    ) -> str:
         draft = await self.ollama_client.chat(prompt_messages)
+        if chat_settings.debug_enabled and update is not None:
+            await self._emit_debug(update, "draft", {"draft_preview": draft[:2500]})
         if not self.settings.self_review_enabled:
             return draft
         latest_user_request = next(
@@ -408,7 +483,28 @@ class LlamaClawBot:
             },
             {"role": "user", "content": f"Produce the best final answer to this request now: {latest_user_request}"},
         ]
+        if chat_settings.debug_enabled and update is not None:
+            await self._emit_debug(update, "review_prompt_preview", self._summarize_prompt(review_messages))
         return await self.ollama_client.chat(review_messages)
+
+    async def _emit_debug(self, update: Update, stage: str, payload: dict) -> None:
+        if not update.message:
+            return
+        message = f"[debug:{stage}]\n```json\n{json.dumps(payload, indent=2)[:3800]}\n```"
+        await update.message.reply_text(message)
+
+    @staticmethod
+    def _summarize_prompt(messages: list[dict[str, str]]) -> dict:
+        return {
+            "message_count": len(messages),
+            "messages": [
+                {
+                    "role": message["role"],
+                    "preview": message["content"][:600],
+                }
+                for message in messages[-10:]
+            ],
+        }
 
 
 def ensure_default_system_prompt(settings: Settings, store: JsonFileStore) -> str:

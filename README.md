@@ -64,6 +64,14 @@ You can also launch it as a Python module:
 python -m app
 ```
 
+## Telegram Commands
+
+- `/enable`: turn on debug tracing for the current chat
+- `/disable`: turn off debug tracing
+- `/deepthinking`: enable much broader context and research fan-out for the current chat
+- `/normalthinking`: return to the standard research profile
+- `/clearcontext` or `/resetcontext`: wipe only the rolling conversation context while keeping onboarding and long-term memory
+
 ## Optional Docker
 
 ```bash
