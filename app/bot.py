@@ -15,7 +15,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from app.clients import BraveSearchClient, OllamaClient
 from app.config import Settings
-from app.models import ChatMessage, ChatSettings, CommandDecision, ResearchOutline, ResearchPlan
+from app.models import ChatMessage, ChatSettings, CommandDecision, ResearchEvidence, ResearchOutline, ResearchPlan
 from app.repositories import (
     ChatSettingsRepository,
     ConversationRepository,
@@ -175,25 +175,33 @@ class LlamaClawBot:
             if chat_settings.debug_enabled:
                 await self._emit_debug(update, "research_plan", research_plan.model_dump(exclude_none=True))
             aggregated = await self._run_research_workers(research_plan, chat_settings)
+            evidence = await self._extract_research_evidence(
+                user_text,
+                research_plan,
+                aggregated["blocks"],
+                aggregated["search_results"],
+                aggregated["crawled_pages"],
+            )
             search_results = aggregated["search_results"]
             crawled_pages = aggregated["crawled_pages"]
             research_context = (
                 "Internet access is available for this reply through a multi-worker research pipeline.\n"
                 "The app spawned independent research workers, saved their outputs to temp files, and aggregated them here.\n"
-                "Use the following research packet as your browsing context.\n"
+                "Use the following ranked evidence packet as your browsing context.\n"
                 "When site crawl pages are present, synthesize across the whole crawled site rather than treating it as a single page.\n"
                 "Legitimate business prospecting and public lead research are allowed tasks.\n"
                 "Be explicit that you are using web research when relevant.\n\n"
                 f"Command decision: {command.model_dump_json(exclude_none=True)}\n"
                 f"Research plan: {research_plan.model_dump_json(exclude_none=True)}\n\n"
-                + aggregated["context"]
+                + self._format_evidence_packet(evidence)
             )
             if chat_settings.debug_enabled:
                 await self._emit_debug(update, "aggregated_research", {
                     "worker_count": aggregated["worker_count"],
                     "search_result_count": len(search_results),
                     "crawl_page_count": len(crawled_pages),
-                    "context_preview": aggregated["context"][:3000],
+                    "evidence_count": len(evidence),
+                    "evidence_preview": self._format_evidence_packet(evidence)[:3000],
                 })
 
         memory = self.memory_repo.load()
@@ -270,22 +278,25 @@ class LlamaClawBot:
     async def _build_research_plan(self, text: str, command: CommandDecision, profile, conversation: list[ChatMessage]) -> ResearchPlan:
         profile_summary = self.context_assembler._build_profile_summary(profile) if profile else ""
         recent_context = "\n".join(f"{message.role}: {message.text}" for message in conversation[-6:])
+        intent_type = self._classify_research_intent(text, command)
         planner_messages = [
             {
                 "role": "system",
                 "content": (
                     "You create a research fan-out plan for a local research bot. "
-                    "Return strict JSON only with keys search_queries, crawl_urls, goal. "
+                    "Return strict JSON only with keys intent_type, search_queries, crawl_urls, goal. "
                     "Generate multiple focused search queries that cover different angles of the task. "
                     "Prefer 6 to 12 search queries. "
                     "If a specific site should be crawled, include it in crawl_urls. "
                     "Use the user profile to resolve references like my business or my company. "
+                    "For news requests, prioritize fresh news queries around companies, labs, products, and major developments rather than generic business template searches. "
                     "Do not include markdown fences or commentary."
                 ),
             },
             {
                 "role": "system",
                 "content": (
+                    f"Detected intent type: {intent_type}\n\n"
                     "User profile context:\n"
                     + (profile_summary or "- No completed onboarding profile yet.")
                     + "\n\nRecent conversation:\n"
@@ -298,18 +309,20 @@ class LlamaClawBot:
             raw = await self.ollama_client.chat(planner_messages)
             data = self._extract_json_object(raw)
             plan = ResearchPlan.model_validate(data)
+            plan.intent_type = plan.intent_type or intent_type
             if command.search and command.search not in plan.search_queries:
                 plan.search_queries.insert(0, command.search)
             if command.url and command.url not in plan.crawl_urls:
                 plan.crawl_urls.insert(0, command.url)
-            return plan
+            return self._sanitize_research_plan(plan, command)
         except Exception:
             base_query = command.search or self._research_query(text)
-            return ResearchPlan(
+            return self._sanitize_research_plan(ResearchPlan(
+                intent_type=intent_type,
                 goal=base_query,
-                search_queries=self._fallback_research_queries(base_query, profile),
+                search_queries=self._fallback_research_queries(base_query, profile, intent_type),
                 crawl_urls=[command.url] if command.url else [],
-            )
+            ), command)
 
     @staticmethod
     def _research_query(text: str) -> str:
@@ -333,24 +346,117 @@ class LlamaClawBot:
     def _select_crawl_target(search_results: list) -> str | None:
         return search_results[0].url if search_results else None
 
-    def _fallback_research_queries(self, base_query: str, profile) -> list[str]:
-        queries = [
-            base_query,
-            f"{base_query} official website",
-            f"{base_query} services",
-            f"{base_query} team founder",
-            f"{base_query} pricing offer",
-            f"{base_query} reviews case study",
-            f"{base_query} linkedin",
-            f"{base_query} contact",
-        ]
+    def _fallback_research_queries(self, base_query: str, profile, intent_type: str) -> list[str]:
+        if intent_type == "news":
+            queries = [
+                f"{base_query} news today",
+                f"{base_query} latest developments",
+                f"{base_query} Reuters",
+                f"{base_query} TechCrunch",
+                f"{base_query} MIT News",
+                f"OpenAI latest news",
+                f"Anthropic latest news",
+                f"Google DeepMind latest news",
+                f"Meta AI latest news",
+                f"NVIDIA AI latest news",
+            ]
+        elif intent_type == "company":
+            queries = [
+                base_query,
+                f"{base_query} official website",
+                f"{base_query} products",
+                f"{base_query} leadership",
+                f"{base_query} funding news",
+                f"{base_query} about",
+                f"{base_query} contact",
+                f"{base_query} linkedin",
+            ]
+        elif intent_type == "leadgen":
+            queries = [
+                base_query,
+                f"{base_query} official website",
+                f"{base_query} marketing team",
+                f"{base_query} founders",
+                f"{base_query} contact",
+                f"{base_query} linkedin company",
+                f"{base_query} meta ads",
+                f"{base_query} services",
+            ]
+        elif intent_type == "technical":
+            queries = [
+                base_query,
+                f"{base_query} documentation",
+                f"{base_query} release notes",
+                f"{base_query} benchmark",
+                f"{base_query} GitHub",
+                f"{base_query} technical blog",
+                f"{base_query} arXiv",
+            ]
+        else:
+            queries = [
+                base_query,
+                f"{base_query} official website",
+                f"{base_query} overview",
+                f"{base_query} latest developments",
+                f"{base_query} analysis",
+                f"{base_query} reviews case study",
+                f"{base_query} contact",
+            ]
         if profile and profile.active_projects:
             queries.extend(f"{project} {base_query}" for project in profile.active_projects[:2])
+        deduped = self._sanitize_research_queries(queries, intent_type)
+        return deduped[: self.settings.research_parallel_search_workers]
+
+    @staticmethod
+    def _classify_research_intent(text: str, command: CommandDecision) -> str:
+        lower = (command.search or text).lower()
+        if any(token in lower for token in ["recent", "latest", "today", "this week", "news", "changes", "update"]):
+            return "news"
+        if any(token in lower for token in ["lead", "prospect", "contact", "sell", "outreach"]):
+            return "leadgen"
+        if any(token in lower for token in ["api", "model", "benchmark", "release notes", "documentation", "technical"]):
+            return "technical"
+        if any(token in lower for token in ["company", "business", "startup", "brand", "founder"]):
+            return "company"
+        return "general"
+
+    @staticmethod
+    def _sanitize_research_queries(queries: list[str], intent_type: str) -> list[str]:
+        banned_fragments = {"pricing offer", "team founder", "services contact"}
         deduped: list[str] = []
         for query in queries:
-            if query and query not in deduped:
-                deduped.append(query)
-        return deduped[: self.settings.research_parallel_search_workers]
+            normalized = " ".join(query.split()).strip()
+            if not normalized:
+                continue
+            if "[" in normalized or "]" in normalized:
+                continue
+            if any(fragment in normalized.lower() for fragment in banned_fragments):
+                continue
+            if intent_type == "news" and not any(
+                token in normalized.lower()
+                for token in ["news", "latest", "today", "this week", "developments", "reuters", "techcrunch", "mit news"]
+            ):
+                normalized = f"{normalized} latest news"
+            if normalized not in deduped:
+                deduped.append(normalized)
+        return deduped
+
+    def _sanitize_research_plan(self, plan: ResearchPlan, command: CommandDecision) -> ResearchPlan:
+        plan.search_queries = self._sanitize_research_queries(plan.search_queries, plan.intent_type)
+        if plan.intent_type == "news":
+            plan.crawl_urls = [url for url in plan.crawl_urls if command.url and url == command.url]
+            if not plan.search_queries:
+                base_query = command.search or plan.goal or "AI updates"
+                plan.search_queries = self._fallback_research_queries(base_query, None, "news")
+        else:
+            cleaned_urls: list[str] = []
+            for url in plan.crawl_urls:
+                if "[" in url or "]" in url:
+                    continue
+                cleaned_urls.append(url)
+            plan.crawl_urls = cleaned_urls[: self.settings.research_parallel_crawl_workers]
+        plan.search_queries = plan.search_queries[: self.settings.research_parallel_search_workers * 2]
+        return plan
 
     async def _run_research_workers(self, plan: ResearchPlan, chat_settings: ChatSettings) -> dict:
         work_dir = Path(tempfile.mkdtemp(prefix="llamaclaw-research-"))
@@ -404,12 +510,26 @@ class LlamaClawBot:
             + "\n\n".join(aggregated_summaries)
             + ("\n\nNo worker output captured." if not aggregated_summaries else "")
         )
+        context = self._compress_research_context(context, plan.intent_type)
         return {
             "context": context,
+            "blocks": aggregated_summaries,
             "search_results": search_results,
             "crawled_pages": crawled_pages,
             "worker_count": len(output_paths),
         }
+
+    @staticmethod
+    def _compress_research_context(context: str, intent_type: str) -> str:
+        sections = [block.strip() for block in context.split("\n\n") if block.strip()]
+        if intent_type == "news":
+            preferred = [
+                block for block in sections
+                if any(source in block.lower() for source in ["reuters", "techcrunch", "mit", "openai", "anthropic", "deepmind", "meta", "nvidia"])
+            ]
+            fallback = [block for block in sections if block not in preferred]
+            sections = preferred + fallback
+        return "\n\n".join(sections[:18])
 
     async def _spawn_worker(self, mode: str, output_path: Path, query: str | None = None, url: str | None = None) -> Path:
         command = [
@@ -442,6 +562,171 @@ class LlamaClawBot:
         )
         await process.wait()
         return output_path
+
+    async def _extract_research_evidence(
+        self,
+        latest_user_request: str,
+        plan: ResearchPlan,
+        blocks: list[str],
+        search_results: list,
+        crawled_pages: list,
+    ) -> list[ResearchEvidence]:
+        evidence: list[ResearchEvidence] = self._evidence_from_search_results(search_results, plan.intent_type)
+        evidence.extend(self._evidence_from_crawled_pages(crawled_pages))
+
+        batches = self._chunk_blocks(blocks, batch_size=4)
+        for batch in batches:
+            batch_text = "\n\n".join(batch)
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract the most relevant factual evidence from the supplied research notes. "
+                        "Return strict JSON only with a top-level key evidence containing a list of objects. "
+                        "Each object must contain claim, source, date, relevance_score, notes. "
+                        "Use a 0 to 1 relevance_score. "
+                        "Prefer dated, concrete, recent, user-relevant facts. "
+                        "For news intent, ignore evergreen background facts unless they are directly needed. "
+                        "Do not invent facts not present in the notes."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"User request: {latest_user_request}\n"
+                        f"Intent: {plan.intent_type}\n\n"
+                        "Research notes:\n"
+                        f"{batch_text}"
+                    ),
+                },
+            ]
+            try:
+                raw = await self.ollama_client.chat(messages)
+                data = self._extract_json_object(raw)
+                for item in data.get("evidence", []):
+                    validated = ResearchEvidence.model_validate(item)
+                    if self._is_useful_evidence(validated):
+                        evidence.append(validated)
+            except Exception:
+                continue
+
+        if not evidence:
+            evidence = self._fallback_evidence_from_blocks(blocks)
+
+        ranked = sorted(
+            evidence,
+            key=lambda item: self._score_evidence(item, latest_user_request, plan.intent_type),
+            reverse=True,
+        )
+        deduped: list[ResearchEvidence] = []
+        seen_claims: set[str] = set()
+        for item in ranked:
+            claim_key = item.claim.strip().lower()
+            if not claim_key or claim_key in seen_claims:
+                continue
+            seen_claims.add(claim_key)
+            item.relevance_score = round(self._score_evidence(item, latest_user_request, plan.intent_type), 3)
+            deduped.append(item)
+        return deduped[:18]
+
+    @staticmethod
+    def _evidence_from_search_results(search_results: list, intent_type: str) -> list[ResearchEvidence]:
+        evidence: list[ResearchEvidence] = []
+        for item in search_results[:20]:
+            if not isinstance(item, dict):
+                continue
+            snippet = (item.get("snippet") or "").strip()
+            title = (item.get("title") or "").strip()
+            url = (item.get("url") or "").strip()
+            if not snippet:
+                continue
+            source = urlparse(url).netloc or title or "search result"
+            claim = snippet
+            notes = title if title and title != snippet else None
+            base_score = 0.45 if intent_type == "news" else 0.35
+            evidence.append(
+                ResearchEvidence(
+                    claim=claim[:500],
+                    source=source,
+                    date=None,
+                    relevance_score=base_score,
+                    notes=notes,
+                )
+            )
+        return evidence
+
+    @staticmethod
+    def _evidence_from_crawled_pages(crawled_pages: list) -> list[ResearchEvidence]:
+        evidence: list[ResearchEvidence] = []
+        for item in crawled_pages[:10]:
+            if not isinstance(item, dict):
+                continue
+            excerpt = (item.get("excerpt") or "").strip()
+            url = (item.get("url") or "").strip()
+            title = (item.get("title") or "").strip()
+            if not excerpt:
+                continue
+            evidence.append(
+                ResearchEvidence(
+                    claim=excerpt[:500],
+                    source=urlparse(url).netloc or url or "crawled page",
+                    relevance_score=0.25,
+                    notes=title or None,
+                )
+            )
+        return evidence
+
+    @staticmethod
+    def _chunk_blocks(blocks: list[str], batch_size: int) -> list[list[str]]:
+        return [blocks[index : index + batch_size] for index in range(0, len(blocks), batch_size)]
+
+    @staticmethod
+    def _fallback_evidence_from_blocks(blocks: list[str]) -> list[ResearchEvidence]:
+        evidence: list[ResearchEvidence] = []
+        for block in blocks[:10]:
+            lines = [line.strip() for line in block.splitlines() if line.strip()]
+            source = lines[0][:200] if lines else "unknown source"
+            claim_lines = [line for line in lines[1:] if not line.startswith("URL:")]
+            for line in claim_lines[:2]:
+                evidence.append(ResearchEvidence(claim=line[:400], source=source, relevance_score=0.3))
+        return evidence
+
+    @staticmethod
+    def _is_useful_evidence(item: ResearchEvidence) -> bool:
+        claim = item.claim.strip()
+        if len(claim) < 40:
+            return False
+        if claim.lower().startswith(("1. ", "2. ", "3. ")) and "|" not in claim and ":" not in claim:
+            return False
+        return True
+
+    @staticmethod
+    def _score_evidence(item: ResearchEvidence, latest_user_request: str, intent_type: str) -> float:
+        score = item.relevance_score or 0.0
+        haystack = f"{item.claim} {item.notes or ''} {item.source}".lower()
+        query_terms = {term for term in re.findall(r"[a-zA-Z]{3,}", latest_user_request.lower()) if term not in {"tell", "about", "with", "recent"}}
+        overlap = sum(1 for term in query_terms if term in haystack)
+        score += min(overlap * 0.12, 0.36)
+        if item.date and re.search(r"202[45-9]|2030", item.date):
+            score += 0.2
+        if intent_type == "news" and any(source in haystack for source in ["reuters", "techcrunch", "mit", "openai", "anthropic", "deepmind", "meta", "nvidia"]):
+            score += 0.18
+        return score
+
+    @staticmethod
+    def _format_evidence_packet(evidence: list[ResearchEvidence]) -> str:
+        if not evidence:
+            return "Evidence packet:\n- No ranked evidence was extracted."
+        lines = ["Evidence packet:"]
+        for index, item in enumerate(evidence, start=1):
+            header = f"{index}. {item.claim} | source={item.source}"
+            if item.date:
+                header += f" | date={item.date}"
+            header += f" | relevance={item.relevance_score:.3f}"
+            lines.append(header)
+            if item.notes:
+                lines.append(f"   notes: {item.notes}")
+        return "\n".join(lines)
 
     @staticmethod
     def _append_sources(response_text: str, search_results: list) -> str:
@@ -549,7 +834,8 @@ class LlamaClawBot:
                     "Return strict JSON only with keys title and sections. "
                     "The title should be concise and human-readable. "
                     "The sections should be 4 to 7 concrete headings that together answer the user's request thoroughly. "
-                    "Prefer headings that stand alone well."
+                    "Prefer headings that stand alone well. "
+                    "For news-style requests, prefer headings like what changed, the biggest announcements, company moves, what matters now, and sources."
                 ),
             },
             {"role": "user", "content": f"Build the report outline for this request: {latest_user_request}"},
@@ -586,20 +872,25 @@ class LlamaClawBot:
                 "content": (
                     "Write one section of a research report in plain text. "
                     "Use clean human-readable formatting with short paragraphs and bullet points where they improve clarity. "
-                    "Do not use markdown emphasis, bold, italics, decorative formatting, or hype. "
-                    "Do not write in an excited, breathless, or promotional tone. "
-                    "Avoid all-caps emphasis and avoid lines like 'X is revolutionary'. "
-                    "This section must stand on its own and still fit the full report. "
-                    "Use only the supplied research context and conversation context. "
-                    "Be detailed and concrete rather than terse. "
-                    "Prefer this structure when it fits: "
-                    "1. a short opening summary paragraph, "
-                    "2. 3 to 6 bullet points with the most relevant developments, including dates, names, and specifics when available, "
-                    "3. a short 'Why this matters' paragraph, "
-                    "4. a short 'Sources used' line naming the strongest sources for that section. "
-                    "Only include claims grounded in the provided research packet."
-                ),
-            },
+                "Do not use markdown emphasis, bold, italics, decorative formatting, or hype. "
+                "Do not write in an excited, breathless, or promotional tone. "
+                "Avoid all-caps emphasis and avoid lines like 'X is revolutionary'. "
+                "Do not repeat the section title in the body. "
+                "This section must stand on its own and still fit the full report. "
+                "Use only the supplied research context and conversation context. "
+                "Do not rely on background knowledge or older remembered facts outside the supplied packet. "
+                "If the supplied packet does not support a claim, leave it out. "
+                "Be detailed and concrete rather than terse. "
+                "Prefer this structure when it fits: "
+                "1. a short opening summary paragraph, "
+                "2. 3 to 6 bullet points with the most relevant developments, including dates, names, and specifics when available, "
+                "3. a short 'Why this matters' paragraph, "
+                "4. a short 'Sources used' line naming the strongest sources for that section. "
+                "For time-sensitive questions, explicitly mention dates and prioritize the most recent developments. "
+                "For news requests, prefer developments from the last 30 days when available and avoid padding with older evergreen milestones. "
+                "Only include claims grounded in the provided research packet."
+            ),
+        },
             {
                 "role": "user",
                 "content": (

@@ -99,6 +99,7 @@ class CommandDecision(BaseModel):
 
 
 class ResearchPlan(BaseModel):
+    intent_type: Literal["general", "news", "company", "leadgen", "technical"] = "general"
     search_queries: list[str] = Field(default_factory=list)
     crawl_urls: list[str] = Field(default_factory=list)
     goal: str | None = None
@@ -107,6 +108,14 @@ class ResearchPlan(BaseModel):
 class ResearchOutline(BaseModel):
     title: str
     sections: list[str] = Field(default_factory=list)
+
+
+class ResearchEvidence(BaseModel):
+    claim: str
+    source: str
+    date: str | None = None
+    relevance_score: float = 0.0
+    notes: str | None = None
 
 
 class WorkerResult(BaseModel):

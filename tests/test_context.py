@@ -2,7 +2,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 from app.bot import LlamaClawBot
-from app.models import ChatMessage, CommandDecision, MemoryItem, MemoryStore, ResearchOutline, UserProfile, utc_now
+from app.models import ChatMessage, CommandDecision, MemoryItem, MemoryStore, ResearchEvidence, ResearchOutline, ResearchPlan, UserProfile, utc_now
 from app.services import ContextAssembler, MemoryScorer
 
 
@@ -212,6 +212,92 @@ def test_clean_plain_text_removes_markdown_emphasis() -> None:
     assert "##" not in cleaned
     assert "Bold" in cleaned
     assert "\n\n\n" not in cleaned
+
+
+def test_classify_research_intent_detects_news() -> None:
+    intent = LlamaClawBot._classify_research_intent(
+        "tell me about the recent changes with AI",
+        CommandDecision(cmd="research", search="recent AI changes"),
+    )
+
+    assert intent == "news"
+
+
+def test_sanitize_research_queries_removes_bad_templates() -> None:
+    queries = LlamaClawBot._sanitize_research_queries(
+        ["recent AI changes", "recent AI changes pricing offer", "recent AI changes team founder"],
+        "news",
+    )
+
+    assert all("pricing offer" not in query for query in queries)
+    assert all("team founder" not in query for query in queries)
+    assert any("latest news" in query.lower() or "news" in query.lower() for query in queries)
+
+
+def test_sanitize_research_plan_clears_news_crawls_and_placeholders() -> None:
+    bot = object.__new__(LlamaClawBot)
+    bot.settings = SimpleNamespace(research_parallel_crawl_workers=4, research_parallel_search_workers=8)
+    raw_plan = ResearchPlan(
+        intent_type="news",
+        search_queries=["AI updates", "AI in [user industry] latest news"],
+        crawl_urls=["https://www.science.org"],
+        goal="AI updates",
+    )
+
+    sanitized = bot._sanitize_research_plan(raw_plan, CommandDecision(cmd="research", search="AI updates"))
+
+    assert sanitized.crawl_urls == []
+    assert all("[" not in query for query in sanitized.search_queries)
+
+
+def test_score_evidence_prefers_recent_named_sources_for_news() -> None:
+    strong = ResearchEvidence(
+        claim="OpenAI released a new model update",
+        source="Reuters",
+        date="2026-03-19",
+        relevance_score=0.4,
+    )
+    weak = ResearchEvidence(
+        claim="AI has changed many industries",
+        source="Generic Blog",
+        date="2022-01-01",
+        relevance_score=0.4,
+    )
+
+    assert LlamaClawBot._score_evidence(strong, "recent changes with AI", "news") > LlamaClawBot._score_evidence(weak, "recent changes with AI", "news")
+
+
+def test_format_evidence_packet_outputs_plain_ranked_lines() -> None:
+    packet = LlamaClawBot._format_evidence_packet(
+        [
+            ResearchEvidence(
+                claim="OpenAI shipped a model update",
+                source="Reuters",
+                date="2026-03-19",
+                relevance_score=0.91,
+            )
+        ]
+    )
+
+    assert "Evidence packet:" in packet
+    assert "source=Reuters" in packet
+
+
+def test_evidence_from_search_results_prefers_snippets() -> None:
+    evidence = LlamaClawBot._evidence_from_search_results(
+        [
+            {
+                "title": "Reuters AI News | Latest Headlines",
+                "url": "https://www.reuters.com/technology/artificial-intelligence/",
+                "snippet": "OpenAI launched a new enterprise feature this week, according to Reuters.",
+            }
+        ],
+        "news",
+    )
+
+    assert len(evidence) == 1
+    assert "OpenAI launched" in evidence[0].claim
+    assert "reuters.com" in evidence[0].source
 
 
 async def test_build_research_outline_uses_model_output() -> None:
