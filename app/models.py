@@ -104,6 +104,11 @@ class ResearchPlan(BaseModel):
     goal: str | None = None
 
 
+class ResearchOutline(BaseModel):
+    title: str
+    sections: list[str] = Field(default_factory=list)
+
+
 class WorkerResult(BaseModel):
     worker_type: Literal["search", "crawl"]
     target: str

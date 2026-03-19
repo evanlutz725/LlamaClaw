@@ -2,7 +2,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 from app.bot import LlamaClawBot
-from app.models import ChatMessage, CommandDecision, MemoryItem, MemoryStore, UserProfile, utc_now
+from app.models import ChatMessage, CommandDecision, MemoryItem, MemoryStore, ResearchOutline, UserProfile, utc_now
 from app.services import ContextAssembler, MemoryScorer
 
 
@@ -72,6 +72,15 @@ def test_context_includes_runtime_capabilities() -> None:
     assert "Runtime capabilities" in messages[0]["content"]
     assert "You can access the internet through Brave Search" in messages[0]["content"]
     assert "multiple pages from the same website" in messages[0]["content"]
+
+
+def test_context_includes_current_timestamp() -> None:
+    assembler = ContextAssembler("system prompt", chat_window_size=20)
+
+    messages = assembler.build_messages(MemoryStore(), [])
+
+    assert "Current timestamp" in messages[0]["content"]
+    assert "Local date:" in messages[0]["content"]
 
 
 class FakeOllamaClient:
@@ -183,3 +192,20 @@ def test_prompt_summary_keeps_recent_message_previews() -> None:
 
     assert summary["message_count"] == 3
     assert summary["messages"][-1]["preview"] == "assistant draft"
+
+
+def test_clean_plain_text_removes_markdown_emphasis() -> None:
+    cleaned = LlamaClawBot._clean_plain_text("**Bold**\n## Heading\nPlain text")
+
+    assert "**" not in cleaned
+    assert "##" not in cleaned
+    assert "Bold" in cleaned
+
+
+async def test_build_research_outline_uses_model_output() -> None:
+    bot = object.__new__(LlamaClawBot)
+    bot.ollama_client = FakeOllamaClient(['{"title":"Modern AI Advancements","sections":["What Changed","Why It Matters"]}'])
+
+    outline = await bot._build_research_outline([{"role": "system", "content": "prompt"}], "tell me about ai")
+
+    assert outline == ResearchOutline(title="Modern AI Advancements", sections=["What Changed", "Why It Matters"])

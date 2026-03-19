@@ -24,6 +24,7 @@ class ContextAssembler:
         research_context: str | None = None,
     ) -> list[dict[str, str]]:
         system_content = self._system_prompt
+        system_content += "\n\nCurrent timestamp:\n" + self._build_time_summary()
         if profile:
             profile_summary = self._build_profile_summary(profile)
             if profile_summary:
@@ -59,6 +60,16 @@ class ContextAssembler:
         for message in recent_messages:
             messages.append({"role": message.role, "content": message.text})
         return messages
+
+    @staticmethod
+    def _build_time_summary() -> str:
+        now = datetime.now().astimezone()
+        return (
+            f"- Local datetime: {now.isoformat()}\n"
+            f"- Local date: {now.strftime('%Y-%m-%d')}\n"
+            f"- Local weekday: {now.strftime('%A')}\n"
+            f"- Local timezone: {now.tzname() or 'unknown'}"
+        )
 
     @staticmethod
     def _build_profile_summary(profile: UserProfile) -> str:

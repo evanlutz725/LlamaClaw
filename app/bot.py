@@ -15,7 +15,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from app.clients import BraveSearchClient, OllamaClient
 from app.config import Settings
-from app.models import ChatMessage, ChatSettings, CommandDecision, ResearchPlan
+from app.models import ChatMessage, ChatSettings, CommandDecision, ResearchOutline, ResearchPlan
 from app.repositories import (
     ChatSettingsRepository,
     ConversationRepository,
@@ -205,7 +205,15 @@ class LlamaClawBot:
         )
         if chat_settings.debug_enabled:
             await self._emit_debug(update, "prompt_preview", self._summarize_prompt(prompt_messages))
-        response_text = await self._generate_response(prompt_messages, search_results, chat_settings, update)
+        if command.cmd == "research":
+            response_text = await self._generate_research_report(
+                prompt_messages,
+                user_text,
+                chat_settings,
+                update,
+            )
+        else:
+            response_text = await self._generate_response(prompt_messages, search_results, chat_settings, update)
         response_text = self._append_sources(response_text, search_results)
 
         conversation.messages.append(ChatMessage(id=str(uuid.uuid4()), role="assistant", text=response_text))
@@ -487,6 +495,113 @@ class LlamaClawBot:
             await self._emit_debug(update, "review_prompt_preview", self._summarize_prompt(review_messages))
         return await self.ollama_client.chat(review_messages)
 
+    async def _generate_research_report(
+        self,
+        prompt_messages: list[dict[str, str]],
+        latest_user_request: str,
+        chat_settings: ChatSettings,
+        update: Update | None = None,
+    ) -> str:
+        outline = await self._build_research_outline(prompt_messages, latest_user_request)
+        if chat_settings.debug_enabled and update is not None:
+            await self._emit_debug(update, "research_outline", outline.model_dump())
+
+        report_dir = Path(tempfile.mkdtemp(prefix="llamaclaw-report-"))
+        report_path = report_dir / "report.txt"
+        report_parts = [self._plain_text_heading(outline.title)]
+        report_path.write_text(report_parts[0] + "\n\n", encoding="utf-8")
+
+        for index, section in enumerate(outline.sections, start=1):
+            section_text = await self._generate_report_section(
+                prompt_messages,
+                latest_user_request,
+                outline.title,
+                section,
+            )
+            cleaned = self._clean_plain_text(section_text)
+            block = self._plain_text_heading(section) + "\n" + cleaned.strip()
+            with report_path.open("a", encoding="utf-8") as handle:
+                handle.write(block + "\n\n")
+            if chat_settings.debug_enabled and update is not None:
+                await self._emit_debug(
+                    update,
+                    f"section_{index}",
+                    {
+                        "section": section,
+                        "preview": cleaned[:1500],
+                        "report_path": str(report_path),
+                    },
+                )
+
+        final_text = report_path.read_text(encoding="utf-8").strip()
+        if chat_settings.debug_enabled and update is not None:
+            await self._emit_debug(update, "final_report_path", {"path": str(report_path), "length": len(final_text)})
+        return final_text
+
+    async def _build_research_outline(self, prompt_messages: list[dict[str, str]], latest_user_request: str) -> ResearchOutline:
+        outline_messages = [
+            *prompt_messages,
+            {
+                "role": "system",
+                "content": (
+                    "Create a plain-text research report outline. "
+                    "Return strict JSON only with keys title and sections. "
+                    "The title should be concise and human-readable. "
+                    "The sections should be 4 to 7 concrete headings that together answer the user's request thoroughly. "
+                    "Prefer headings that stand alone well."
+                ),
+            },
+            {"role": "user", "content": f"Build the report outline for this request: {latest_user_request}"},
+        ]
+        try:
+            raw = await self.ollama_client.chat(outline_messages)
+            data = self._extract_json_object(raw)
+            outline = ResearchOutline.model_validate(data)
+            if not outline.sections:
+                raise ValueError("Empty outline sections")
+            return outline
+        except Exception:
+            return ResearchOutline(
+                title="Research Report",
+                sections=[
+                    "What Changed",
+                    "Key Trends",
+                    "Important Examples",
+                    "Practical Takeaways",
+                ],
+            )
+
+    async def _generate_report_section(
+        self,
+        prompt_messages: list[dict[str, str]],
+        latest_user_request: str,
+        title: str,
+        section: str,
+    ) -> str:
+        section_messages = [
+            *prompt_messages,
+            {
+                "role": "system",
+                "content": (
+                    "Write one section of a research report in plain text. "
+                    "Do not use markdown emphasis, bold, italics, bullets unless truly necessary, or decorative formatting. "
+                    "Write flowing, human-readable prose. "
+                    "This section must stand on its own and still fit the full report. "
+                    "Use only the supplied research context and conversation context. "
+                    "Be detailed and concrete rather than terse."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Report title: {title}\n"
+                    f"User request: {latest_user_request}\n"
+                    f"Write the section titled: {section}"
+                ),
+            },
+        ]
+        return await self.ollama_client.chat(section_messages)
+
     async def _emit_debug(self, update: Update, stage: str, payload: dict) -> None:
         if not update.message:
             return
@@ -505,6 +620,16 @@ class LlamaClawBot:
                 for message in messages[-10:]
             ],
         }
+
+    @staticmethod
+    def _clean_plain_text(text: str) -> str:
+        cleaned = text.replace("**", "").replace("__", "").replace("```", "")
+        cleaned = re.sub(r"^\s*#+\s*", "", cleaned, flags=re.MULTILINE)
+        return cleaned.strip()
+
+    @staticmethod
+    def _plain_text_heading(text: str) -> str:
+        return text.strip()
 
 
 def ensure_default_system_prompt(settings: Settings, store: JsonFileStore) -> str:
