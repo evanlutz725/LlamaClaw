@@ -1,3 +1,5 @@
+![LlamaClaw Logo](lc_logo.png)
+
 # LlamaClaw
 
 LlamaClaw is a Telegram research assistant designed to work with Ollama. It keeps a compact long-term memory file, uses recent chat context plus onboarding profile data, fans research out across multiple worker processes, ranks evidence, and writes section-by-section reports instead of relying on a single one-shot response.
