@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     site_crawl_chars_per_page: int = Field(default=1800, alias="SITE_CRAWL_CHARS_PER_PAGE")
     research_parallel_search_workers: int = Field(default=8, alias="RESEARCH_PARALLEL_SEARCH_WORKERS")
     research_parallel_crawl_workers: int = Field(default=4, alias="RESEARCH_PARALLEL_CRAWL_WORKERS")
+    section_quality_threshold: float = Field(default=8.0, alias="SECTION_QUALITY_THRESHOLD")
+    section_quality_max_retries: int = Field(default=3, alias="SECTION_QUALITY_MAX_RETRIES")
     self_review_enabled: bool = Field(default=True, alias="SELF_REVIEW_ENABLED")
     run_mode: str = Field(default="polling", alias="RUN_MODE")
     webhook_url: str = Field(default="", alias="WEBHOOK_URL")

@@ -118,6 +118,13 @@ class ResearchEvidence(BaseModel):
     notes: str | None = None
 
 
+class SectionAssessment(BaseModel):
+    score: float
+    missing: list[str] = Field(default_factory=list)
+    rewrite_objective: str | None = None
+    keep: bool = False
+
+
 class WorkerResult(BaseModel):
     worker_type: Literal["search", "crawl"]
     target: str

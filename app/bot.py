@@ -16,7 +16,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from app.clients import BraveSearchClient, OllamaClient
 from app.config import Settings
-from app.models import ChatMessage, ChatSettings, CommandDecision, ResearchEvidence, ResearchOutline, ResearchPlan
+from app.models import ChatMessage, ChatSettings, CommandDecision, ResearchEvidence, ResearchOutline, ResearchPlan, SectionAssessment
 from app.repositories import (
     ChatSettingsRepository,
     ConversationRepository,
@@ -803,13 +803,15 @@ class LlamaClawBot:
         report_path.write_text(report_parts[0] + "\n\n", encoding="utf-8")
 
         for index, section in enumerate(outline.sections, start=1):
-            section_text = await self._generate_report_section(
-                prompt_messages,
-                latest_user_request,
-                outline.title,
-                section,
+            cleaned, assessment = await self._generate_section_with_quality_loop(
+                prompt_messages=prompt_messages,
+                latest_user_request=latest_user_request,
+                title=outline.title,
+                section=section,
+                chat_settings=chat_settings,
+                update=update,
+                section_index=index,
             )
-            cleaned = self._clean_plain_text(section_text)
             block = self._plain_text_heading(section) + "\n" + cleaned.strip()
             with report_path.open("a", encoding="utf-8") as handle:
                 handle.write(block + "\n\n")
@@ -819,6 +821,7 @@ class LlamaClawBot:
                     f"section_{index}",
                     {
                         "section": section,
+                        "assessment": assessment.model_dump(),
                         "preview": cleaned[:1500],
                         "report_path": str(report_path),
                     },
@@ -828,6 +831,58 @@ class LlamaClawBot:
         if chat_settings.debug_enabled and update is not None:
             await self._emit_debug(update, "final_report_path", {"path": str(report_path), "length": len(final_text)})
         return final_text
+
+    async def _generate_section_with_quality_loop(
+        self,
+        prompt_messages: list[dict[str, str]],
+        latest_user_request: str,
+        title: str,
+        section: str,
+        chat_settings: ChatSettings,
+        update: Update | None,
+        section_index: int,
+    ) -> tuple[str, SectionAssessment]:
+        rewrite_objective: str | None = None
+        best_text = ""
+        best_assessment = SectionAssessment(score=0.0, missing=[], rewrite_objective=None, keep=False)
+
+        for attempt in range(1, self.settings.section_quality_max_retries + 2):
+            section_text = await self._generate_report_section(
+                prompt_messages=prompt_messages,
+                latest_user_request=latest_user_request,
+                title=title,
+                section=section,
+                rewrite_objective=rewrite_objective,
+            )
+            cleaned = self._strip_redundant_heading(self._clean_plain_text(section_text), section)
+            assessment = await self._assess_report_section(
+                prompt_messages=prompt_messages,
+                latest_user_request=latest_user_request,
+                title=title,
+                section=section,
+                section_text=cleaned,
+            )
+            if assessment.score >= best_assessment.score:
+                best_text = cleaned
+                best_assessment = assessment
+            if chat_settings.debug_enabled and update is not None:
+                await self._emit_debug(
+                    update,
+                    f"quality_section_{section_index}_attempt_{attempt}",
+                    {
+                        "section": section,
+                        "attempt": attempt,
+                        "score": assessment.score,
+                        "keep": assessment.keep,
+                        "missing": assessment.missing,
+                        "rewrite_objective": assessment.rewrite_objective,
+                    },
+                )
+            if assessment.score >= self.settings.section_quality_threshold or assessment.keep:
+                return cleaned, assessment
+            rewrite_objective = assessment.rewrite_objective or self._fallback_rewrite_objective(section, assessment.missing)
+
+        return best_text, best_assessment
 
     async def _build_research_outline(self, prompt_messages: list[dict[str, str]], latest_user_request: str) -> ResearchOutline:
         today = datetime.now().astimezone().strftime("%Y-%m-%d")
@@ -871,6 +926,7 @@ class LlamaClawBot:
         latest_user_request: str,
         title: str,
         section: str,
+        rewrite_objective: str | None = None,
     ) -> str:
         today = datetime.now().astimezone().strftime("%Y-%m-%d")
         section_messages = [
@@ -898,7 +954,8 @@ class LlamaClawBot:
                     "Do not open with an older year unless the evidence explicitly supports it and it is still relevant. "
                     "For time-sensitive questions, explicitly mention dates and prioritize the most recent developments. "
                     "For news requests, prefer developments from the last 30 days when available and avoid padding with older evergreen milestones. "
-                    "Only include claims grounded in the provided research packet."
+                    + (f"Additional rewrite objective for this attempt: {rewrite_objective}. " if rewrite_objective else "")
+                    + "Only include claims grounded in the provided research packet."
                 ),
             },
             {
@@ -911,6 +968,53 @@ class LlamaClawBot:
             },
         ]
         return await self.ollama_client.chat(section_messages)
+
+    async def _assess_report_section(
+        self,
+        prompt_messages: list[dict[str, str]],
+        latest_user_request: str,
+        title: str,
+        section: str,
+        section_text: str,
+    ) -> SectionAssessment:
+        assessment_messages = [
+            *prompt_messages,
+            {
+                "role": "system",
+                "content": (
+                    "Assess the quality of a report section against the user's original objective. "
+                    "Return strict JSON only with keys score, missing, rewrite_objective, keep. "
+                    "Use a 0 to 10 score. "
+                    "keep should be true only if the section is strong enough to preserve as-is. "
+                    "missing should list the most important gaps. "
+                    "rewrite_objective should say exactly how the next attempt should improve."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Original objective: {latest_user_request}\n"
+                    f"Report title: {title}\n"
+                    f"Section: {section}\n\n"
+                    "Section draft:\n"
+                    f"{section_text}"
+                ),
+            },
+        ]
+        try:
+            raw = await self.ollama_client.chat(assessment_messages)
+            data = self._extract_json_object(raw)
+            assessment = SectionAssessment.model_validate(data)
+            if assessment.score >= self.settings.section_quality_threshold:
+                assessment.keep = True
+            return assessment
+        except Exception:
+            return SectionAssessment(
+                score=0.0,
+                missing=["Quality assessment failed"],
+                rewrite_objective=f"Rewrite the section '{section}' so it is more specific, more relevant, and more evidence-driven.",
+                keep=False,
+            )
 
     async def _emit_debug(self, update: Update, stage: str, payload: dict) -> None:
         if not update.message:
@@ -942,6 +1046,27 @@ class LlamaClawBot:
     @staticmethod
     def _plain_text_heading(text: str) -> str:
         return text.strip()
+
+    @staticmethod
+    def _fallback_rewrite_objective(section: str, missing: list[str]) -> str:
+        if missing:
+            return f"Rewrite the section '{section}' and fix these gaps: {'; '.join(missing[:4])}."
+        return f"Rewrite the section '{section}' to be more relevant, specific, and directly aligned with the original objective."
+
+    @staticmethod
+    def _strip_redundant_heading(text: str, heading: str) -> str:
+        lines = text.splitlines()
+        normalized_heading = heading.strip().lower().rstrip(":")
+        while lines:
+            first = lines[0].strip().lower().rstrip(":")
+            if not first:
+                lines.pop(0)
+                continue
+            if first == normalized_heading:
+                lines.pop(0)
+                continue
+            break
+        return "\n".join(lines).strip()
 
     async def _reply_in_chunks(self, update: Update, text: str) -> None:
         if not update.message:

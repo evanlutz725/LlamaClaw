@@ -93,6 +93,19 @@ class FakeOllamaClient:
         return self.responses[len(self.calls) - 1]
 
 
+class CyclingOllamaClient:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.calls: list[list[dict[str, str]]] = []
+        self.index = 0
+
+    async def chat(self, messages: list[dict[str, str]]) -> str:
+        self.calls.append(messages)
+        response = self.responses[self.index]
+        self.index += 1
+        return response
+
+
 async def test_self_review_runs_second_pass_when_enabled() -> None:
     bot = object.__new__(LlamaClawBot)
     bot.settings = SimpleNamespace(self_review_enabled=True)
@@ -214,6 +227,12 @@ def test_clean_plain_text_removes_markdown_emphasis() -> None:
     assert "\n\n\n" not in cleaned
 
 
+def test_strip_redundant_heading_removes_duplicate_first_line() -> None:
+    cleaned = LlamaClawBot._strip_redundant_heading("Overview\n\nThis is the section body.", "Overview")
+
+    assert cleaned == "This is the section body."
+
+
 def test_classify_research_intent_detects_news() -> None:
     intent = LlamaClawBot._classify_research_intent(
         "tell me about the recent changes with AI",
@@ -307,3 +326,31 @@ async def test_build_research_outline_uses_model_output() -> None:
     outline = await bot._build_research_outline([{"role": "system", "content": "prompt"}], "tell me about ai")
 
     assert outline == ResearchOutline(title="Modern AI Advancements", sections=["What Changed", "Why It Matters"])
+
+
+async def test_section_quality_loop_retries_until_threshold() -> None:
+    bot = object.__new__(LlamaClawBot)
+    bot.settings = SimpleNamespace(section_quality_max_retries=2, section_quality_threshold=8.0)
+    bot.ollama_client = CyclingOllamaClient(
+        [
+            "weak draft",
+            '{"score":6.5,"missing":["Needs dates"],"rewrite_objective":"Add dates and stronger specifics.","keep":false}',
+            "strong draft with dates",
+            '{"score":8.7,"missing":[],"rewrite_objective":"", "keep":true}',
+        ]
+    )
+    chat_settings = SimpleNamespace(debug_enabled=False)
+
+    text, assessment = await bot._generate_section_with_quality_loop(
+        prompt_messages=[{"role": "system", "content": "prompt"}],
+        latest_user_request="tell me about recent changes with AI",
+        title="Recent AI Updates",
+        section="What Changed",
+        chat_settings=chat_settings,
+        update=None,
+        section_index=1,
+    )
+
+    assert text == "strong draft with dates"
+    assert assessment.score == 8.7
+    assert len(bot.ollama_client.calls) == 4
